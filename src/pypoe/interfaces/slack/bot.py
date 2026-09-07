@@ -25,6 +25,8 @@ from typing import Dict, List, Optional, Any
 import logging
 from dataclasses import dataclass, asdict
 
+from ...core.mrkdwn import to_mrkdwn
+
 try:
     from slack_bolt.async_app import AsyncApp
     from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
@@ -458,6 +460,11 @@ class PyPoeSlackBot:
                 payload = {"response_type": "ephemeral", **message}
             else:
                 payload = {"response_type": "ephemeral", "text": message}
+            # Help / stats / model text is authored in CommonMark; Slack
+            # renders mrkdwn. Convert here rather than rewriting every
+            # literal (see pypoe.core.mrkdwn).
+            if isinstance(payload.get("text"), str):
+                payload["text"] = to_mrkdwn(payload["text"])
             await respond(payload)
 
         async def get_existing_context() -> Optional[SlackConversationContext]:
@@ -690,7 +697,7 @@ class PyPoeSlackBot:
         thread_ts: Optional[str],
     ) -> Dict[str, Any]:
         """Post a message via Web API, threading it when ``thread_ts`` is set."""
-        kwargs: Dict[str, Any] = {"channel": channel_id, "text": text}
+        kwargs: Dict[str, Any] = {"channel": channel_id, "text": to_mrkdwn(text)}
         if thread_ts:
             kwargs["thread_ts"] = thread_ts
         return await self.app.client.chat_postMessage(**kwargs)
@@ -1155,7 +1162,9 @@ class PyPoeSlackBot:
             "slack_thread": "🧵 Thread",
         }.get(chat_mode, "❓ Unknown")
 
-        return f"🤖 **{model}** {context_indicator}\n\n{response}"
+        # Model replies are markdown, and the header below is written in it
+        # too. One conversion covers both (see pypoe.core.mrkdwn).
+        return to_mrkdwn(f"🤖 **{model}** {context_indicator}\n\n{response}")
     
     def _estimate_message_tokens(self, message: Dict[str, str]) -> int:
         """Estimate tokens for a message (rough approximation)"""

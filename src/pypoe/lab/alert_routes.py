@@ -35,6 +35,7 @@ except ImportError:  # pragma: no cover - web-ui extra not installed
     status = None  # type: ignore[assignment]
     _FASTAPI_AVAILABLE = False
 
+from ..core.mrkdwn import to_mrkdwn
 from .config import load_config
 from .http_client import LabClient
 
@@ -655,7 +656,11 @@ async def _post_slack(
         return None
 
     slack = AsyncWebClient(token=token)
-    kwargs = {"channel": channel, "text": text}
+    # Slack renders `text` as mrkdwn, not CommonMark. Every alert line
+    # funnels through here — our own hand-written mrkdwn (which the
+    # converter leaves alone) and the investigator's markdown report alike
+    # — so this is the one place the dialect gap has to be closed.
+    kwargs = {"channel": channel, "text": to_mrkdwn(text)}
     if thread_ts:
         kwargs["thread_ts"] = thread_ts
     resp = await slack.chat_postMessage(**kwargs)

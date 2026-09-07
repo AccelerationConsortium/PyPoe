@@ -1001,3 +1001,57 @@ def test_dashboard_remediate_confirm_reprobe_averts_restart(monkeypatch):
     assert recovered is True
     assert restarts == []
     assert any("confirm re-probe" in s[0] and s[1] for s in steps)
+
+
+# ---------------------------------------------------------------------------
+# _post_slack renders mrkdwn, not CommonMark
+# ---------------------------------------------------------------------------
+# Every other test in this file monkeypatches _post_slack, so nothing else
+# exercises what it actually hands Slack. These two do.
+
+
+class _CapturingSlackClient:
+    """Stands in for slack_sdk's AsyncWebClient, recording the payload."""
+
+    captured: dict = {}
+
+    def __init__(self, token=None):
+        pass
+
+    async def chat_postMessage(self, **kwargs):
+        _CapturingSlackClient.captured = kwargs
+        return {"ts": "1.0"}
+
+
+@pytest.fixture()
+def capture_slack(monkeypatch):
+    import slack_sdk.web.async_client as async_client
+
+    monkeypatch.setattr(async_client, "AsyncWebClient", _CapturingSlackClient)
+    monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-test")
+    _CapturingSlackClient.captured = {}
+    return _CapturingSlackClient
+
+
+@pytest.mark.asyncio
+async def test_post_slack_converts_investigator_markdown(capture_slack):
+    """A model's markdown report reaches Slack as mrkdwn.
+
+    This is the reported bug: `**Root cause:**` rendered as literal
+    asterisks because Slack's text field is mrkdwn, where bold is a single
+    asterisk.
+    """
+    await alert_routes._post_slack(
+        "#lab-alerts", "**Root cause:** the OT-2 lost Wi-Fi.\n- [runbook](http://x/y)"
+    )
+    assert capture_slack.captured["text"] == (
+        "*Root cause:* the OT-2 lost Wi-Fi.\n\u2022  <http://x/y|runbook>"
+    )
+
+
+@pytest.mark.asyncio
+async def test_post_slack_leaves_hand_written_mrkdwn_alone(capture_slack):
+    """PyPoe's own recovery lines are already mrkdwn and must not change."""
+    line = ":white_check_mark: *SDL Assistant* recovered."
+    await alert_routes._post_slack("#lab-alerts", line)
+    assert capture_slack.captured["text"] == line

@@ -38,6 +38,7 @@ except ImportError as exc:  # pragma: no cover - lab extra not installed
 else:
     _MCP_IMPORT_ERROR = None
 
+from ..core.mrkdwn import to_mrkdwn
 from .http_client import LabClient
 
 logger = logging.getLogger(__name__)
@@ -269,7 +270,11 @@ async def _ask_human(
     ch = channel or load_config().slack.alert_channel
     slack = AsyncWebClient(token=token)
 
-    post = await slack.chat_postMessage(channel=ch, text=f":question: {question}")
+    # ``question`` is model-authored, so it arrives as markdown; Slack
+    # renders mrkdwn (see pypoe.core.mrkdwn).
+    post = await slack.chat_postMessage(
+        channel=ch, text=to_mrkdwn(f":question: {question}")
+    )
     thread_ts = post["ts"]
     channel_id = post["channel"]
 
