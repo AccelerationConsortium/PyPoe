@@ -11,6 +11,7 @@ class Config:
     # `chat_models` in config/models.yaml — so Poe and OpenRouter models can be
     # used side by side rather than one replacing the other.
     openrouter_api_key: str = ""
+    openrouter_auto_refresh_models: bool = True
     # OpenRouter bills per token where Poe is a flat subscription, so a
     # runaway loop can actually spend money here. Ceiling on every OpenRouter
     # completion; 0 disables the cap.
@@ -61,6 +62,9 @@ class Config:
 
         self.poe_api_key = os.getenv("POE_API_KEY", self.poe_api_key)
         self.openrouter_api_key = os.getenv("OPENROUTER_API_KEY", self.openrouter_api_key)
+        self.openrouter_auto_refresh_models = _parse_bool(
+            os.getenv("PYPOE_OPENROUTER_AUTO_REFRESH_MODELS"), self.openrouter_auto_refresh_models
+        )
         self.openrouter_max_tokens = _parse_int(
             os.getenv("PYPOE_OPENROUTER_MAX_TOKENS"), self.openrouter_max_tokens
         )

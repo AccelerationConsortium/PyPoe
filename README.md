@@ -97,7 +97,7 @@ service, see the topic-specific docs below.
 
 ## Model providers
 
-The catalog lives in `src/pypoe/config/models.yaml` (gitignored; copy from
+The fallback catalog and default live in `src/pypoe/config/models.yaml` (gitignored; copy from
 `models.example.yaml`). Each entry names its provider — a bare string is a Poe
 model, a mapping is anything else:
 
@@ -109,6 +109,19 @@ chat_models:
   - {id: deepseek/deepseek-v4-flash-0731, provider: openrouter}
   - Claude-Opus-4.8            # bare string => Poe
 ```
+
+With `OPENROUTER_API_KEY` set, opening the model picker refreshes OpenRouter
+choices from `/api/v1/models/user`, filtered by that key's provider preferences
+and guardrails. Results are cached in memory for one hour; failed refreshes keep
+the previous catalog and retry after one minute. Poe entries stay configured in
+YAML. The configured default stays first when available, and existing chats keep
+their selected model. Base token prices refresh too; tiered pricing and extra
+charges are not included in these estimates.
+
+Set `PYPOE_OPENROUTER_AUTO_REFRESH_MODELS=false` to use only the YAML catalog.
+YAML/default changes require a service restart; automatic discovery does not
+rewrite the file. `scripts/utils/update_models.py` is a legacy availability
+tester, not a catalog discovery tool.
 
 | Provider | Key | Billing | Notes |
 |---|---|---|---|

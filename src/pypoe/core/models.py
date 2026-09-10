@@ -15,9 +15,12 @@ used so existing deployments keep working without action.
 Override the file location with ``PYPOE_MODELS_CONFIG=<path>``.
 """
 
+import asyncio
+import hashlib
 import logging
 import math
 import os
+import time
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -138,6 +141,86 @@ def _parse_chat_models(raw) -> tuple[list[str], dict[str, str]]:
     MODEL_PRICING_USD_PER_1M_TOKENS,
     MODEL_PROVIDERS,
 ) = _load()
+
+
+_catalog_lock = asyncio.Lock()
+_catalog_key = None
+_catalog_next_refresh = 0.0
+
+
+def _apply_openrouter_catalog(payload: dict) -> None:
+    """Replace OpenRouter choices, retaining routing for existing conversations."""
+    rows = payload.get("data")
+    if not isinstance(rows, list):
+        raise ValueError("OpenRouter catalog must contain a data list")
+    discovered = {}
+    prices = {}
+    for row in rows:
+        if not isinstance(row, dict) or not isinstance(row.get("id"), str) or not row["id"]:
+            raise ValueError("OpenRouter catalog contains an invalid model")
+        model = row["id"]
+        architecture = row.get("architecture") or {}
+        if "text" not in architecture.get("output_modalities", ["text"]):
+            continue
+        # An explicitly configured model belonging to another provider wins.
+        if model in CHAT_MODELS and provider_for(model) != "openrouter":
+            continue
+        discovered[model] = None
+        try:
+            price = {kind: float(row["pricing"][kind]) * 1_000_000
+                     for kind in ("prompt", "completion")}
+            if all(math.isfinite(value) and value >= 0 for value in price.values()):
+                prices[model] = price
+        except (KeyError, TypeError, ValueError, OverflowError):
+            pass  # Missing/variable prices display as unknown.
+
+    other_models = [m for m in CHAT_MODELS if provider_for(m) != "openrouter"]
+    choices = list(discovered) + other_models
+    if DEFAULT_CHAT_MODEL in choices:
+        choices.remove(DEFAULT_CHAT_MODEL)
+        choices.insert(0, DEFAULT_CHAT_MODEL)
+    # Mutate in place: interfaces import these shared objects directly.
+    CHAT_MODELS[:] = choices
+    MODEL_PROVIDERS.update({m: "openrouter" for m in discovered})
+    for model in discovered:
+        MODEL_PRICING_USD_PER_1M_TOKENS.pop(model, None)
+    MODEL_PRICING_USD_PER_1M_TOKENS.update(prices)
+
+
+async def refresh_openrouter_catalog(api_key: str, *, force: bool = False) -> bool:
+    """Refresh on demand, at most hourly; failures keep the last usable catalog.
+
+    Uses the key-filtered endpoint so workspace restrictions are respected.
+    A failed refresh is retried after one minute, not on every picker request.
+    The application uses one deployment-wide provider key, as with routing.
+    """
+    global _catalog_key, _catalog_next_refresh
+    if not api_key:
+        return False
+    fingerprint = hashlib.sha256(api_key.encode()).digest()
+    async with _catalog_lock:
+        if not force and fingerprint == _catalog_key and time.monotonic() < _catalog_next_refresh:
+            return False
+        try:
+            import httpx
+
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(
+                    "https://openrouter.ai/api/v1/models/user",
+                    headers={"Authorization": f"Bearer {api_key}"},
+                )
+                response.raise_for_status()
+                _apply_openrouter_catalog(response.json())
+        except Exception as exc:
+            # Do not log response bodies or credentials.
+            logger.warning("OpenRouter catalog refresh failed (%s); retaining previous catalog",
+                           type(exc).__name__)
+            _catalog_key = fingerprint
+            _catalog_next_refresh = time.monotonic() + 60
+            return False
+        _catalog_key = fingerprint
+        _catalog_next_refresh = time.monotonic() + 3600
+        return True
 
 
 def provider_for(model: str) -> str:

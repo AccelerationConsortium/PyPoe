@@ -7,6 +7,8 @@
 #
 # If `models.yaml` is missing, the loader falls back to the hardcoded
 # values inside `pypoe.core.models` (in step with the snapshot below).
+# OpenRouter choices refresh automatically from /models/user when a key is set.
+# Set PYPOE_OPENROUTER_AUTO_REFRESH_MODELS=false for a fixed YAML roster.
 # Tip: run `scripts/utils/update_models.py` to test which models are
 # currently live on Poe before editing this list.
 #

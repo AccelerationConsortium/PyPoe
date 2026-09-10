@@ -5,7 +5,7 @@ from typing import AsyncGenerator, List, Dict, Any, Optional
 import fastapi_poe as fp
 
 from .config import get_config, Config
-from .models import CHAT_MODELS, DEFAULT_CHAT_MODEL, provider_for
+from .models import CHAT_MODELS, DEFAULT_CHAT_MODEL, provider_for, refresh_openrouter_catalog
 from .provider_health import (
     ACCOUNT_BLOCKING_REASONS,
     MODEL_SCOPED_REASONS,
@@ -476,12 +476,9 @@ class PoeChatClient:
         return exc
 
     async def get_available_bots(self) -> List[str]:
-        """
-        Get the chat-only Poe models configured for this deployment.
-
-        Update ``pypoe.core.models.CHAT_MODELS`` when Poe's supported model
-        catalog changes.
-        """
+        """Get configured Poe models and the cached, accessible OpenRouter catalog."""
+        if getattr(self.config, "openrouter_auto_refresh_models", True):
+            await refresh_openrouter_catalog(getattr(self.config, "openrouter_api_key", ""))
         return list(CHAT_MODELS)
 
     async def get_conversations(self) -> List[Dict[str, Any]]:

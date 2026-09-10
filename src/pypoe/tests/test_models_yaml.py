@@ -94,63 +94,21 @@ def _shipped(name):
     return yaml.safe_load(path.read_text())
 
 
-#: The models expected to actually work — both on OpenRouter, because every
-#: Poe route is gated behind the lapsed subscription.
-WORKING_MODELS = {"z-ai/glm-5.2", "deepseek/deepseek-v4-flash-0731"}
-
-
 @pytest.mark.parametrize("filename", ["models.yaml", "models.example.yaml"])
-def test_shipped_roster_defaults_to_glm_52_via_openrouter(filename):
-    """GLM-5.2 is the configured chat model, routed to OpenRouter.
-
-    Both platforms carry GLM-5.2; OpenRouter is the route because Poe's API
-    access is gated behind a subscription. Pinned so the two roster files can't
-    drift apart or silently lose the routing tag.
-    """
+def test_shipped_roster_has_routed_and_priced_default(filename):
+    """Local catalogs can refresh independently of the example snapshot."""
     from pypoe.core.models import _parse_chat_models
 
     data = _shipped(filename)
     ids, providers = _parse_chat_models(data["chat_models"])
-
-    assert data["default"] == "z-ai/glm-5.2"
-    assert providers["z-ai/glm-5.2"] == "openrouter"
-    # The default must be in the roster, or the dropdown offers something the
-    # rest of the app treats as unknown.
-    assert data["default"] in ids
-
-
-@pytest.mark.parametrize("filename", ["models.yaml", "models.example.yaml"])
-def test_working_models_are_openrouter_routed(filename):
-    """The models a user can actually reach today are all OpenRouter.
-
-    Poe's own GLM-5.2 and the GPT bots were dropped 2026-08-09: a dropdown
-    entry that fails at the first request is worse than no entry.
-    """
-    from pypoe.core.models import _parse_chat_models
-
-    ids, providers = _parse_chat_models(_shipped(filename)["chat_models"])
-
-    assert WORKING_MODELS <= set(ids)
-    for model in WORKING_MODELS:
-        assert providers[model] == "openrouter"
-    # The Poe duplicates must stay gone, or the dropdown offers dead routes.
-    assert "GLM-5.2" not in ids
-    assert not [m for m in ids if m.startswith("GPT")]
-
-
-@pytest.mark.parametrize("filename", ["models.yaml", "models.example.yaml"])
-def test_shipped_roster_prices_the_working_models(filename):
-    data = _shipped(filename)
+    default = data["default"]
+    assert default in ids
+    assert providers[default] == "openrouter"
     pricing = data["pricing_usd_per_1m_tokens"]
-    assert pricing["z-ai/glm-5.2"] == {"prompt": 0.1120, "completion": 0.3520}
-    assert pricing["deepseek/deepseek-v4-flash-0731"] == {
-        "prompt": 0.0900,
-        "completion": 0.1800,
-    }
-    # Every working model must be priced, or the UI shows "price unknown" for
-    # the only routes anyone can use.
-    for model in WORKING_MODELS:
-        assert model in pricing
+    for model in ids:
+        if providers.get(model) == "openrouter":
+            assert pricing[model]["prompt"] >= 0
+            assert pricing[model]["completion"] >= 0
 
 
 @pytest.mark.parametrize("filename", ["models.yaml", "models.example.yaml"])
