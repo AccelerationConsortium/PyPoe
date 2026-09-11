@@ -132,9 +132,10 @@ def test_consult_defaults_are_reachable_models():
         assert model in CHAT_MODELS, f"consult model {model!r} is not in chat_models"
 
 
-def test_investigation_model_default_is_sonnet_5(monkeypatch):
+def test_investigation_model_default_is_luna_max(monkeypatch):
     cfg = lab_config.load_config()
-    assert cfg.alerts.investigation_model == "claude-sonnet-5"
+    assert cfg.alerts.investigation_model == "gpt-5.6-luna"
+    assert cfg.alerts.investigation_reasoning_effort == "max"
 
 
 def test_consult_yaml(monkeypatch, tmp_path):
@@ -212,3 +213,11 @@ def test_dashboard_yaml_and_env(monkeypatch, tmp_path):
     monkeypatch.setenv("LAB_DASHBOARD_BASE_URL", "http://127.0.0.1:9101")
     cfg2 = lab_config.reload_config()
     assert cfg2.dashboard.base_url == "http://127.0.0.1:9101"
+
+
+def test_investigation_reasoning_yaml_and_env(monkeypatch, tmp_path):
+    path = _write_yaml(tmp_path, {"lab": {"alerts": {"investigation_reasoning_effort": "high"}}})
+    monkeypatch.setenv("PYPOE_LAB_CONFIG", str(path))
+    assert lab_config.reload_config().alerts.investigation_reasoning_effort == "high"
+    monkeypatch.setenv("LAB_INVESTIGATION_REASONING_EFFORT", "max")
+    assert lab_config.reload_config().alerts.investigation_reasoning_effort == "max"

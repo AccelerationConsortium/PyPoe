@@ -3,11 +3,11 @@
 Mounted onto PyPoe's existing FastAPI app (``interfaces/web/app.py``).
 Receives Uptime Kuma's default JSON payload, posts an instant
 "Investigating…" message into Slack, and kicks off a background
-``claude -p`` invocation against the lab MCP server. The investigation
+``codex exec`` invocation against the lab MCP server. The investigation
 result is appended as a threaded reply.
 
 Concurrency is bounded by a process-wide semaphore so a flood of alerts
-doesn't fork an unbounded number of ``claude`` subprocesses.
+doesn't fork an unbounded number of ``codex`` subprocesses.
 """
 
 from __future__ import annotations
@@ -41,14 +41,10 @@ from .http_client import LabClient
 
 logger = logging.getLogger(__name__)
 
-_MAX_CLAUDE_OUTPUT_CHARS = 3000
+_MAX_INVESTIGATOR_OUTPUT_CHARS = 4000
 _DEFAULT_MAX_CONCURRENT = 2
-_ALLOWED_TOOL_GLOB = "mcp__pypoe-lab__*"
 
-#: The investigator's role + read-only mandate, injected via
-#: ``--append-system-prompt`` so it is enforced as a system instruction rather
-#: than buried in the user prompt (the incident-specific steps stay there).
-#: Mirrors the dashboard assistant's ``SYSTEM_PROMPT`` pattern.
+#: Investigator mandate, injected as Codex developer instructions.
 SYSTEM_PROMPT = """You are the AC Organic Self-driving Lab's automated incident \
 investigator. An alert has fired; investigate it using the read-only \
 `pypoe-lab` MCP server and report a concise root-cause summary for a Slack \
@@ -59,24 +55,30 @@ You are READ-ONLY. You cannot actuate hardware and must never propose calling \
 it in plain English for a human or a `lab-skills` workflow to carry out.
 
 Ground every conclusion in evidence you actually read via the MCP tools. If the \
-data does not support a conclusion, say so plainly rather than speculate."""
+data does not support a conclusion, say so plainly rather than speculate.
+
+Keep the final Slack reply concise, with a short labelled paragraph for each
+consulted model and a final Lead investigator paragraph. Each model's section,
+including your own, must be 100 words or fewer; this is a ceiling, not a target.
+Summarise each model's diagnosis, supporting evidence, and recommended action.
+In your conclusion, resolve meaningful disagreement and state the next action.
+Say "unconfirmed" when the evidence is insufficient. If a consultation fails,
+use a single short line under that model's name; never invent its opinion.
+If no models were consulted, provide only your conclusion in 100 words or fewer.
+Avoid tool-call narration, raw logs, repeated alert details, and repeated
+arguments. Keep detailed findings in the journal observation."""
 
 
 def _investigator_runtime_dir() -> Path:
-    """Minimal scratch dir for the investigation subprocess.
+    """Scratch cwd outside the repository, avoiding project instructions.
 
-    Holds the generated ``mcp.json`` and doubles as the subprocess cwd.
-    Deliberately *outside* the pypoe repo tree so the spawned ``claude`` finds
-    no project ``CLAUDE.md`` / ``CLAUDE.local.md`` to auto-load — that bundle
-    would otherwise be re-read on every alert, thrashing the prompt cache and
-    burning usage limits (the same reason the dashboard assistant isolates its
-    cwd). Override with ``PYPOE_INVESTIGATOR_RUNTIME_DIR``.
+    Override with ``PYPOE_INVESTIGATOR_RUNTIME_DIR``.
     """
 
     d = Path(
         os.environ.get(
             "PYPOE_INVESTIGATOR_RUNTIME_DIR",
-            str(Path.home() / ".cache" / "pypoe-investigator"),
+            str(Path.home() / ".pypoe" / "investigator"),
         )
     )
     d.mkdir(parents=True, exist_ok=True)
@@ -87,25 +89,25 @@ def _investigator_cwd() -> str:
     return os.environ.get("PYPOE_INVESTIGATOR_CWD") or str(_investigator_runtime_dir())
 
 
-def _claude_binary() -> Optional[str]:
-    """Resolve the ``claude`` CLI, tolerating a minimal systemd PATH.
+def _codex_binary() -> Optional[str]:
+    """Resolve the ``codex`` CLI, tolerating a minimal systemd PATH.
 
     PyPoe's web service runs under systemd with a PATH that usually excludes
     ``~/.local/bin``, so ``shutil.which`` alone often misses a per-user install.
     Honour an explicit override, then fall back to well-known install paths.
     """
 
-    override = os.environ.get("PYPOE_CLAUDE_BIN")
+    override = os.environ.get("PYPOE_CODEX_BIN")
     if override:
         return override
-    found = shutil.which("claude")
+    found = shutil.which("codex")
     if found:
         return found
     candidates = [
-        Path.home() / ".local" / "bin" / "claude",
-        Path("/usr/local/bin/claude"),
-        Path("/opt/claude/bin/claude"),
-        Path("/home/sdl2/.local/bin/claude"),
+        Path.home() / ".local" / "bin" / "codex",
+        Path("/usr/local/bin/codex"),
+        Path("/opt/codex/bin/codex"),
+        Path("/home/sdl2/.local/bin/codex"),
     ]
     for c in candidates:
         if c.is_file() and os.access(c, os.X_OK):
@@ -133,42 +135,25 @@ def _pypoe_binary() -> str:
     return "pypoe"
 
 
-def _write_mcp_config(cfg) -> Path:
-    """Materialise an explicit ``pypoe-lab`` MCP config and return its path.
-
-    Passed via ``--mcp-config`` + ``--strict-mcp-config`` so the investigation
-    sees *only* this read-only server regardless of the subprocess cwd or any
-    filesystem-discovered ``claude`` MCP config — hermetic, like the dashboard
-    assistant. The MCP server subprocess needs a few env vars to reach the
-    aggregator and (for ``consult_poe``) Poe; forward just those.
-    """
-
-    env: dict[str, str] = {"LAB_API_URL": cfg.api_url}
-    for key in (
-        "POE_API_KEY",
-        "LAB_MCP_AGENT_SOURCE",
-        "LAB_MCP_HTTP_TIMEOUT",
-        "LAB_CONSULT_ENABLED",
-        "LAB_CONSULT_MODELS",
-        "PYPOE_LAB_CONFIG",
-    ):
-        val = os.environ.get(key)
-        if val is not None:
-            env[key] = val
-
-    config = {
-        "mcpServers": {
-            "pypoe-lab": {
-                "type": "stdio",
-                "command": _pypoe_binary(),
-                "args": ["lab-mcp"],
-                "env": env,
-            }
-        }
+def _codex_mcp_args(cfg) -> list[str]:
+    """Configure only the lab server; pass secrets through env, never argv."""
+    server = {
+        "command": _pypoe_binary(),
+        "args": ["lab-mcp"],
+        "env_vars": [
+            "POE_API_KEY", "OPENROUTER_API_KEY", "LAB_MCP_AGENT_SOURCE",
+            "LAB_MCP_HTTP_TIMEOUT", "LAB_CONSULT_ENABLED", "LAB_CONSULT_MODELS",
+            "PYPOE_LAB_CONFIG",
+        ],
+        "required": True,
+        # Equivalent to the former Claude --allowedTools lab-server glob.
+        "default_tools_approval_mode": "approve",
     }
-    path = _investigator_runtime_dir() / "mcp.json"
-    path.write_text(json.dumps(config, indent=2))
-    return path
+    args = []
+    for key, value in server.items():
+        args.extend(["-c", f"mcp_servers.pypoe-lab.{key}={json.dumps(value)}"])
+    args.extend(["-c", f"mcp_servers.pypoe-lab.env.LAB_API_URL={json.dumps(cfg.api_url)}"])
+    return args
 
 
 _INVESTIGATION_PROMPT_HEAD = """\
@@ -217,12 +202,15 @@ _CONSULT_BLOCK = """\
    step 2 — the consulted model has no MCP access of its own, so the
    string you supply is the ONLY information it sees.
 
+   Ask each model to answer in 100 words or fewer, covering its diagnosis,
+   key evidence, and next action.
+
    Models to consult (one call per model):
 {models_block}
 
    If a `consult_poe` call returns `returncode != 0` (Poe unreachable,
-   bad bot, missing API key, etc.), note the failure in your summary
-   but DO NOT abort — continue with the rest of the investigation.
+   bad bot, missing API key, etc.), record the failure in the journal
+   and continue. Include a single short failure line under that model in Slack.
 """
 
 _NO_CONSULT_BLOCK = """\
@@ -241,16 +229,9 @@ calling `/control/*` directly. If recovery requires a control action,
 recommend it in plain English so a human or workflow can execute it via
 `lab-skills`.
 
-End with a synthesised Slack-thread reply that contains, in order:
-  - One-line headline of the most likely root cause.
-  - 1-2 bullets per consulted model summarising what it said,
-    explicitly noting any divergences (e.g. "GPT-5.4 thinks X;
-    Claude-Opus-4.7 thinks Y").
-  - 1-2 lines of YOUR own diagnosis, citing the lab evidence.
-  - If recovery requires a control action, recommend it in plain
-    English (NOT as a /control/* call).
-Keep the total reply under 2500 characters so it fits in one Slack
-message after truncation.
+End with a labelled summary for each consulted model, then your synthesised
+Lead investigator conclusion. Each section must be 100 words or fewer.
+Include key evidence and the next action; journal the details.
 """
 
 _INVESTIGATION_PROMPT_TAIL_SOLO = """\
@@ -264,7 +245,8 @@ calling `/control/*` directly. If recovery requires a control action,
 recommend it in plain English so a human or workflow can execute it via
 `lab-skills`.
 
-End with a 2-4 line summary suitable for a Slack thread reply.
+End with your Lead investigator conclusion in 100 words or fewer, covering
+the likely cause, key evidence, and next action. Journal the details.
 """
 
 
@@ -518,56 +500,41 @@ async def _investigate(
 ) -> None:
     async with semaphore:
         try:
-            output = await _run_claude(prompt)
+            output = await _run_codex(prompt)
         except Exception as exc:
             output = f":x: Investigation failed to start: {exc}"
-        if len(output) > _MAX_CLAUDE_OUTPUT_CHARS:
-            output = output[: _MAX_CLAUDE_OUTPUT_CHARS - 100] + "\n…(truncated)"
+        if len(output) > _MAX_INVESTIGATOR_OUTPUT_CHARS:
+            output = output[: _MAX_INVESTIGATOR_OUTPUT_CHARS - 100] + "\n…(truncated)"
         try:
             await _post_slack(channel, output, thread_ts=thread_ts)
         except Exception as exc:
             logger.error("Failed to post investigation reply: %s", exc)
 
 
-async def _run_claude(prompt: str) -> str:
-    """Run a hardened ``claude`` investigation and return stdout (or an error).
-
-    Adopts the dashboard assistant's safeguards: a pinned ``--model`` (no silent
-    tier drift), an explicit ``--mcp-config`` + ``--strict-mcp-config`` (only the
-    read-only ``pypoe-lab`` server, independent of cwd), a cwd outside the repo
-    tree (no ``CLAUDE.md`` bundle re-read per alert), the role/read-only mandate
-    via ``--append-system-prompt``, and a hard wallclock timeout so a hung CLI
-    can never linger against the concurrency budget.
-    """
-
-    binary = _claude_binary()
+async def _run_codex(prompt: str) -> str:
+    """Run Codex with pinned reasoning, isolated lab MCP tools and a timeout."""
+    binary = _codex_binary()
     if binary is None:
-        return (
-            ":x: `claude` CLI not on PATH. Install it on the same host as PyPoe "
-            "(see https://docs.anthropic.com/en/docs/claude-code) or set "
-            "`PYPOE_CLAUDE_BIN` so the webhook can spawn investigations."
-        )
+        return ":x: `codex` CLI not on PATH. Install Codex or set `PYPOE_CODEX_BIN`."
 
     cfg = load_config()
-    mcp_config_path = _write_mcp_config(cfg)
     timeout_s = cfg.alerts.investigation_timeout_s
     args = [
-        binary,
-        "-p",
-        prompt,
-        "--model",
-        cfg.alerts.investigation_model,
-        "--append-system-prompt",
-        SYSTEM_PROMPT,
-        "--mcp-config",
-        str(mcp_config_path),
-        "--strict-mcp-config",
-        # Headless -p runs cannot grant permissions interactively, so the lab
-        # MCP tools must be pre-allowed or every call is refused.
-        "--allowedTools",
-        _ALLOWED_TOOL_GLOB,
-        "--permission-mode",
-        "default",
+        binary, "exec", "--ignore-user-config", "--ignore-rules",
+        "--ephemeral", "--skip-git-repo-check", "--sandbox", "read-only",
+        "--model", cfg.alerts.investigation_model,
+        "-c", f"model_reasoning_effort={json.dumps(cfg.alerts.investigation_reasoning_effort)}",
+        "-c", "approval_policy=\"never\"",
+        "-c", f"developer_instructions={json.dumps(SYSTEM_PROMPT)}",
+        "-c", "features.shell_tool=false",
+        "-c", "features.unified_exec=false",
+        "-c", "features.apps=false",
+        "-c", "web_search=\"disabled\"",
+        "-c", "project_doc_max_bytes=0",
+        "-c", f"sqlite_home={json.dumps(str(_investigator_runtime_dir()))}",
+        "-c", f"log_dir={json.dumps(str(_investigator_runtime_dir()))}",
+        *_codex_mcp_args(cfg),
+        "--color", "never", prompt,
     ]
 
     try:
@@ -579,7 +546,7 @@ async def _run_claude(prompt: str) -> str:
             stderr=asyncio.subprocess.PIPE,
         )
     except FileNotFoundError:
-        return f":x: could not spawn `{binary}` — check the install / `PYPOE_CLAUDE_BIN`."
+        return f":x: could not spawn `{binary}` — check the install / `PYPOE_CODEX_BIN`."
 
     try:
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
@@ -596,7 +563,7 @@ async def _run_claude(prompt: str) -> str:
 
     if proc.returncode != 0:
         return (
-            f":x: `claude` exited {proc.returncode}\n"
+            f":x: `codex` exited {proc.returncode}\n"
             f"```\n{stderr.decode(errors='replace').strip()[:1500]}\n```"
         )
     return stdout.decode(errors="replace").strip()

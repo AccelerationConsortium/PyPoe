@@ -49,13 +49,11 @@ class SlackSection:
 @dataclass(frozen=True)
 class AlertsSection:
     max_concurrent_investigations: int = 2
-    #: Model passed to ``claude --model`` for the investigation. Pinned
-    #: (rather than inheriting the host CLI default) so investigations are
-    #: reproducible and don't silently drift onto a different tier. Runs on the
-    #: local Claude Code CLI (subscription/OAuth), NOT Poe. Env:
-    #: ``LAB_INVESTIGATION_MODEL``.
-    investigation_model: str = "claude-sonnet-5"
-    #: Hard wallclock cap (seconds) on a single ``claude`` investigation
+    #: Lead investigator runs through local Codex authentication, not Poe.
+    #: Env: ``LAB_INVESTIGATION_MODEL`` / ``LAB_INVESTIGATION_REASONING_EFFORT``.
+    investigation_model: str = "gpt-5.6-luna"
+    investigation_reasoning_effort: str = "max"
+    #: Hard wallclock cap (seconds) on a single ``codex`` investigation
     #: subprocess. Generous by default because an investigation fans out to
     #: several MCP reads plus per-model ``consult_poe`` round-trips, but bounded
     #: so a hung CLI can never linger. Env: ``LAB_INVESTIGATION_TIMEOUT_S``.
@@ -153,9 +151,9 @@ class ConsultSection:
     """Which Poe models the alert handler asks for a second opinion.
 
     When ``enabled`` is True (default), the investigation prompt
-    *requires* Claude to call ``consult_poe`` for each listed model
+    *requires* the investigator to call ``consult_poe`` for each listed model
     and synthesise their responses into the Slack summary. When False
-    (or ``models`` is empty), Claude investigates solo.
+    (or ``models`` is empty), the lead investigates solo.
 
     These are reached through PyPoe's provider seam (distinct from the
     local-CLI investigator model above), so each name must appear in
@@ -329,6 +327,11 @@ def load_config() -> LabConfig:
             os.environ.get("LAB_INVESTIGATION_MODEL")
             or _dig(lab_root, "alerts", "investigation_model")
             or AlertsSection.__dataclass_fields__["investigation_model"].default
+        ),
+        investigation_reasoning_effort=(
+            os.environ.get("LAB_INVESTIGATION_REASONING_EFFORT")
+            or _dig(lab_root, "alerts", "investigation_reasoning_effort")
+            or AlertsSection.__dataclass_fields__["investigation_reasoning_effort"].default
         ),
         investigation_timeout_s=(
             _env_float("LAB_INVESTIGATION_TIMEOUT_S")

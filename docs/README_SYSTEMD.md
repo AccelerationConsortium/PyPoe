@@ -102,3 +102,20 @@ systemctl --user is-active pypoe-web pypoe-slack
 - The hardened system unit at `scripts/setup/pypoe-web.service` is for a
   dedicated `pypoe` system user; ignore it if you're using the user
   units above.
+
+## Alert investigator
+
+Lab alert investigations use the local `codex exec` CLI with `gpt-5.6-luna`
+and `max` reasoning. Configure `lab.alerts.investigation_model` and
+`investigation_reasoning_effort` in `src/pypoe/config/slack.yaml`, or override
+them with `LAB_INVESTIGATION_MODEL` and `LAB_INVESTIGATION_REASONING_EFFORT`.
+The service user must have a working Codex login. `PYPOE_CODEX_BIN` can point
+to a custom CLI installation. The CLI must support `--ignore-user-config`,
+`--ignore-rules`, and `--ephemeral`.
+
+Investigations load only the lab MCP server, disable shell and app tools,
+and run with a read-only sandbox and the existing 300-second timeout.
+Runtime state lives in `~/.pypoe/investigator` (override with
+`PYPOE_INVESTIGATOR_RUNTIME_DIR`); allow this directory in systemd's
+`ReadWritePaths` when filesystem hardening is enabled. Restart the web service
+after changing the investigator code or configuration.
